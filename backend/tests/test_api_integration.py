@@ -158,34 +158,39 @@ class TestFullJobLifecycle:
         else:
             pytest.fail(f"Job didn't complete within {max_wait}s, last status: {final_status}")
         
-        # Get the result
+        # Get the result metadata
         resp = integration_client.get(f"/api/v1/jobs/{job_id}/result")
         assert resp.status_code == 200
         result = resp.json()
         
-        # Verify result structure
+        # Verify metadata structure (no components in this response)
         assert result["source_file"] == "test.png"
         assert result["total_pages"] == 1
-        assert "pages" in result
-        assert len(result["pages"]) == 1
+        assert result["total_components"] > 0
         
-        # Verify page structure
-        page = result["pages"][0]
-        assert page["page_number"] == 1
-        assert "components" in page
+        # Fetch components in batches
+        resp = integration_client.get(
+            f"/api/v1/jobs/{job_id}/result/components",
+            params={"offset": 0, "limit": 100},
+        )
+        assert resp.status_code == 200
+        batch = resp.json()
+        assert batch["total"] == result["total_components"]
+        assert batch["has_more"] is False
         
-        # Components should be categorized
-        for comp in page["components"]:
+        # Verify component structure
+        for comp in batch["components"]:
             assert "id" in comp
             assert "category" in comp
             assert comp["category"] in ("text", "figure", "misc")
             assert "base64" in comp
             assert "bbox" in comp
+            assert "page_number" in comp
         
-        # Verify job marked as delivered after fetching result
+        # Job should still be completed (no auto-cleanup)
         resp = integration_client.get(f"/api/v1/jobs/{job_id}")
         assert resp.status_code == 200
-        # Note: job status might be 'completed' or 'delivered' depending on timing
+        assert resp.json()["status"] == "completed"
 
 
 class TestSequentialJobProcessing:
@@ -277,8 +282,8 @@ class TestProgressUpdates:
 class TestCleanupBehavior:
     """Test file and job cleanup in various scenarios."""
     
-    def test_job_data_directory_created_and_cleaned(self, integration_client, tmp_path):
-        """Verify job data directory is created during processing and cleaned after delivery."""
+    def test_job_data_persists_after_result_fetch(self, integration_client, tmp_path):
+        """Verify job data persists after fetching results (no auto-cleanup)."""
         job_data_dir = tmp_path / "job_data"
         
         # Create and upload test image
@@ -306,23 +311,19 @@ class TestCleanupBehavior:
         job_dir = job_data_dir / job_id
         assert job_dir.exists(), "Job directory should exist after completion"
         
-        # Get result (triggers background cleanup task)
+        # Fetch metadata and components
         resp = integration_client.get(f"/api/v1/jobs/{job_id}/result")
         assert resp.status_code == 200
+        resp = integration_client.get(
+            f"/api/v1/jobs/{job_id}/result/components",
+            params={"offset": 0, "limit": 10},
+        )
+        assert resp.status_code == 200
         
-        # Poll for delivered status (background task needs time to run)
-        max_wait = 10
-        start = time.time()
-        final_status = None
-        while time.time() - start < max_wait:
-            resp = integration_client.get(f"/api/v1/jobs/{job_id}")
-            final_status = resp.json()["status"]
-            if final_status == "delivered":
-                break
-            time.sleep(0.2)
-        
-        # Job should be marked delivered (or we at least got the result successfully)
-        assert final_status in ("completed", "delivered"), f"Expected completed or delivered, got {final_status}"
+        # Job data should STILL exist (no auto-cleanup on fetch)
+        assert job_dir.exists(), "Job directory should persist after result fetch"
+        resp = integration_client.get(f"/api/v1/jobs/{job_id}")
+        assert resp.json()["status"] == "completed"
     
     def test_delete_job_cleans_up_files(self, integration_client, tmp_path):
         """Test that DELETE endpoint removes job files and DB entry."""
@@ -360,29 +361,74 @@ class TestErrorHandling:
     """Test error scenarios and recovery."""
     
     def test_invalid_file_type_rejected(self, integration_client):
-        """Test that invalid file types are rejected."""
-        # Upload a text file disguised as PDF
+        """Test that a corrupt/invalid file fails during processing."""
         resp = integration_client.post(
             "/api/v1/extract",
             files={"file": ("test.pdf", b"not a real pdf", "application/pdf")},
         )
         
-        # Should be accepted initially, then fail during processing
+        # Accepted initially (validation is async)
         assert resp.status_code == 202
         job_id = resp.json()["job_id"]
         
-        # Wait for it to fail
+        # Must reach 'failed' status
         max_wait = 30
         start = time.time()
         while time.time() - start < max_wait:
             resp = integration_client.get(f"/api/v1/jobs/{job_id}")
-            status = resp.json()["status"]
-            if status == "failed":
+            data = resp.json()
+            if data["status"] == "failed":
+                assert data["error"] is not None, "Failed job should have an error message"
                 break
+            elif data["status"] == "completed":
+                pytest.fail("Corrupt file should not complete successfully")
             time.sleep(0.5)
         else:
-            # If it didn't fail, that's also ok - might be processed as text
-            pass
+            pytest.fail(f"Job didn't fail within {max_wait}s, last status: {data['status']}")
+    
+    def test_file_too_large_rejected(self, integration_client):
+        """Upload exceeding MAX_UPLOAD_SIZE should return 413."""
+        from yoink.api import routes
+        original = routes.MAX_UPLOAD_SIZE
+        # Temporarily lower limit so we don't need 100MB of RAM
+        routes.MAX_UPLOAD_SIZE = 1024  # 1KB
+        try:
+            big_content = b"x" * 2048  # 2KB > 1KB limit
+            resp = integration_client.post(
+                "/api/v1/extract",
+                files={"file": ("big.png", big_content, "image/png")},
+            )
+            assert resp.status_code == 413
+            assert "too large" in resp.json()["detail"].lower()
+        finally:
+            routes.MAX_UPLOAD_SIZE = original
+    
+    def test_get_result_404_nonexistent_job(self, integration_client):
+        """GET /result for nonexistent job should return 404."""
+        resp = integration_client.get("/api/v1/jobs/nonexistent/result")
+        assert resp.status_code == 404
+    
+    def test_delete_nonexistent_job_404(self, integration_client):
+        """DELETE for nonexistent job should return 404."""
+        resp = integration_client.delete("/api/v1/jobs/nonexistent")
+        assert resp.status_code == 404
+    
+    def test_get_status_nonexistent_job_404(self, integration_client):
+        """GET /jobs/{id} for nonexistent job should return 404."""
+        resp = integration_client.get("/api/v1/jobs/nonexistent")
+        assert resp.status_code == 404
+
+
+class TestHealthEndpoint:
+    """Test the health check endpoint."""
+    
+    def test_health_returns_ok(self, integration_client):
+        """Health endpoint should return status ok."""
+        resp = integration_client.get("/api/v1/health")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["status"] == "ok"
+        assert "model_loaded" in data
 
 
 class TestFeedbackEndpoint:
@@ -455,6 +501,155 @@ class TestFeedbackEndpoint:
             json={"job_id": job_id, "type": "spam"},
         )
         assert resp.status_code == 422
+
+
+class TestBatchedComponentLoading:
+    """Test the batched component loading endpoints."""
+    
+    def _upload_and_wait(self, client, tmp_path, max_wait=60):
+        """Helper: upload a test image and wait for completion. Returns job_id."""
+        test_img = tmp_path / "test_batch.png"
+        create_test_image(test_img)
+        with open(test_img, "rb") as f:
+            resp = client.post(
+                "/api/v1/extract",
+                files={"file": ("test_batch.png", f, "image/png")},
+            )
+        assert resp.status_code == 202
+        job_id = resp.json()["job_id"]
+        
+        start = time.time()
+        while time.time() - start < max_wait:
+            resp = client.get(f"/api/v1/jobs/{job_id}")
+            if resp.json()["status"] == "completed":
+                return job_id
+            elif resp.json()["status"] == "failed":
+                pytest.fail(f"Job failed: {resp.json().get('error')}")
+            time.sleep(0.5)
+        pytest.fail("Job didn't complete in time")
+    
+    def test_result_metadata_returns_no_components(self, integration_client, tmp_path):
+        """GET /result should return metadata only, no page/component data."""
+        job_id = self._upload_and_wait(integration_client, tmp_path)
+        resp = integration_client.get(f"/api/v1/jobs/{job_id}/result")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "source_file" in data
+        assert "total_pages" in data
+        assert "total_components" in data
+        assert "pages" not in data
+        assert "components" not in data
+    
+    def test_batch_loading_first_batch(self, integration_client, tmp_path):
+        """Fetch the first batch of components with offset=0."""
+        job_id = self._upload_and_wait(integration_client, tmp_path)
+        resp = integration_client.get(
+            f"/api/v1/jobs/{job_id}/result/components",
+            params={"offset": 0, "limit": 3},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["offset"] == 0
+        assert data["limit"] == 3
+        assert data["total"] > 0
+        assert len(data["components"]) <= 3
+        for comp in data["components"]:
+            assert "page_number" in comp
+            assert "id" in comp
+            assert "category" in comp
+            assert "base64" in comp
+    
+    def test_batch_loading_sequential_fetches_all(self, integration_client, tmp_path):
+        """Sequentially fetch all components in batches of 3."""
+        job_id = self._upload_and_wait(integration_client, tmp_path)
+        
+        # Get total
+        resp = integration_client.get(f"/api/v1/jobs/{job_id}/result")
+        total = resp.json()["total_components"]
+        
+        # Fetch all in batches
+        all_components = []
+        offset = 0
+        limit = 3
+        while True:
+            resp = integration_client.get(
+                f"/api/v1/jobs/{job_id}/result/components",
+                params={"offset": offset, "limit": limit},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            all_components.extend(data["components"])
+            if not data["has_more"]:
+                break
+            offset += limit
+        
+        assert len(all_components) == total
+    
+    def test_batch_offset_beyond_total(self, integration_client, tmp_path):
+        """Offset beyond total components should return empty list."""
+        job_id = self._upload_and_wait(integration_client, tmp_path)
+        resp = integration_client.get(
+            f"/api/v1/jobs/{job_id}/result/components",
+            params={"offset": 9999, "limit": 10},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["components"]) == 0
+        assert data["has_more"] is False
+    
+    def test_different_offsets_return_different_components(self, integration_client, tmp_path):
+        """Verify that offset=0 and offset=N return different component IDs."""
+        job_id = self._upload_and_wait(integration_client, tmp_path)
+        
+        resp1 = integration_client.get(
+            f"/api/v1/jobs/{job_id}/result/components",
+            params={"offset": 0, "limit": 3},
+        )
+        resp2 = integration_client.get(
+            f"/api/v1/jobs/{job_id}/result/components",
+            params={"offset": 3, "limit": 3},
+        )
+        assert resp1.status_code == 200
+        assert resp2.status_code == 200
+        
+        ids_batch1 = {c["id"] for c in resp1.json()["components"]}
+        ids_batch2 = {c["id"] for c in resp2.json()["components"]}
+        
+        # The two batches must not overlap
+        assert ids_batch1.isdisjoint(ids_batch2), (
+            f"Batches overlap: {ids_batch1 & ids_batch2}"
+        )
+    
+    def test_result_metadata_409_when_not_completed(self, integration_client, tmp_path):
+        """GET /result should return 409 for a job that hasn't completed."""
+        test_img = tmp_path / "test.png"
+        create_test_image(test_img)
+        with open(test_img, "rb") as f:
+            resp = integration_client.post(
+                "/api/v1/extract",
+                files={"file": ("test.png", f, "image/png")},
+            )
+        job_id = resp.json()["job_id"]
+        
+        # Immediately check — job should still be queued/processing
+        resp_status = integration_client.get(f"/api/v1/jobs/{job_id}")
+        if resp_status.json()["status"] != "completed":
+            resp = integration_client.get(f"/api/v1/jobs/{job_id}/result")
+            assert resp.status_code == 409
+            
+            resp = integration_client.get(
+                f"/api/v1/jobs/{job_id}/result/components",
+                params={"offset": 0, "limit": 10},
+            )
+            assert resp.status_code == 409
+    
+    def test_components_nonexistent_job(self, integration_client):
+        """Components endpoint should return 404 for nonexistent job."""
+        resp = integration_client.get(
+            "/api/v1/jobs/nonexistent/result/components",
+            params={"offset": 0, "limit": 10},
+        )
+        assert resp.status_code == 404
 
 
 class TestJobStoreUnit:

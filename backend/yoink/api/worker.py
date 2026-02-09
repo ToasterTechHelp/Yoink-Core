@@ -158,6 +158,7 @@ class ExtractionWorker:
                 result_path=str(result_path),
                 current_page=result["total_pages"],
                 total_pages=result["total_pages"],
+                total_components=result["total_components"],
             )
             logger.info("Job %s completed: %d components", job_id, result["total_components"])
 

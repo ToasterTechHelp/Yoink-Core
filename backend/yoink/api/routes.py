@@ -6,10 +6,11 @@ import shutil
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Request, UploadFile
+from fastapi import APIRouter, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
 
 from yoink.api.models import (
+    ComponentBatchResponse,
     ErrorResponse,
     FeedbackRequest,
     FeedbackResponse,
@@ -17,6 +18,7 @@ from yoink.api.models import (
     JobResponse,
     JobStatusResponse,
     ProgressInfo,
+    ResultMetadataResponse,
 )
 from yoink.api.worker import ExtractionWorker
 
@@ -24,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-MAX_UPLOAD_SIZE = 50 * 1024 * 1024  # 50 MB
+MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 UPLOAD_DIR = Path("./uploads")
 
 
@@ -92,17 +94,16 @@ async def get_job_status(request: Request, job_id: str):
 
 @router.get(
     "/jobs/{job_id}/result",
+    response_model=ResultMetadataResponse,
     responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
 )
-async def get_job_result(request: Request, background_tasks: BackgroundTasks, job_id: str):
-    """Get the extraction result. Triggers cleanup after response is sent."""
+async def get_job_result(request: Request, job_id: str):
+    """Get extraction result metadata (no components). Use /result/components to fetch batches."""
     job_store = request.app.state.job_store
     job = await job_store.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    if job["status"] == "delivered":
-        raise HTTPException(status_code=409, detail="Result already delivered and cleaned up")
     if job["status"] != "completed":
         raise HTTPException(
             status_code=409,
@@ -113,32 +114,61 @@ async def get_job_result(request: Request, background_tasks: BackgroundTasks, jo
     if result_path is None or not Path(result_path).exists():
         raise HTTPException(status_code=404, detail="Result file not found")
 
-    # Read result JSON
     with open(result_path, "r", encoding="utf-8") as f:
         result_data = json.load(f)
 
-    # Schedule cleanup after response is sent
-    background_tasks.add_task(
-        _cleanup_after_delivery,
-        job_store,
-        job_id,
-        job.get("upload_path"),
-        result_path,
+    return ResultMetadataResponse(
+        source_file=result_data["source_file"],
+        total_pages=result_data["total_pages"],
+        total_components=result_data["total_components"],
     )
 
-    return result_data
 
-
-async def _cleanup_after_delivery(
-    job_store, job_id: str, upload_path: str | None, result_path: str | None
+@router.get(
+    "/jobs/{job_id}/result/components",
+    response_model=ComponentBatchResponse,
+    responses={404: {"model": ErrorResponse}, 409: {"model": ErrorResponse}},
+)
+async def get_result_components(
+    request: Request, job_id: str, offset: int = 0, limit: int = 10,
 ):
-    """Mark job as delivered and clean up files."""
-    try:
-        ExtractionWorker.cleanup_job_files(upload_path, result_path)
-        await job_store.update_status(job_id, "delivered")
-        logger.info("Job %s delivered and cleaned up", job_id)
-    except Exception:
-        logger.exception("Failed to clean up job %s after delivery", job_id)
+    """Get a batch of components from the extraction result."""
+    job_store = request.app.state.job_store
+    job = await job_store.get_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    if job["status"] != "completed":
+        raise HTTPException(
+            status_code=409,
+            detail=f"Job is not completed yet. Current status: {job['status']}",
+        )
+
+    result_path = job["result_path"]
+    if result_path is None or not Path(result_path).exists():
+        raise HTTPException(status_code=404, detail="Result file not found")
+
+    with open(result_path, "r", encoding="utf-8") as f:
+        result_data = json.load(f)
+
+    # Flatten all components across pages, preserving page_number
+    all_components = []
+    for page in result_data["pages"]:
+        for comp in page["components"]:
+            comp["page_number"] = page["page_number"]
+            all_components.append(comp)
+
+    total = len(all_components)
+    batch = all_components[offset : offset + limit]
+    has_more = (offset + limit) < total
+
+    return ComponentBatchResponse(
+        offset=offset,
+        limit=limit,
+        total=total,
+        has_more=has_more,
+        components=batch,
+    )
 
 
 @router.delete(

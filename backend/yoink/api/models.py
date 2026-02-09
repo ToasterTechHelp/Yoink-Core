@@ -45,5 +45,21 @@ class FeedbackResponse(BaseModel):
     status: str = "submitted"
 
 
+class ResultMetadataResponse(BaseModel):
+    """Returned on GET /jobs/{id}/result — metadata only, no components."""
+    source_file: str
+    total_pages: int
+    total_components: int
+
+
+class ComponentBatchResponse(BaseModel):
+    """Returned on GET /jobs/{id}/result/components — a batch of components."""
+    offset: int
+    limit: int
+    total: int
+    has_more: bool
+    components: list[dict]
+
+
 class ErrorResponse(BaseModel):
     detail: str
