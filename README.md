@@ -142,10 +142,10 @@ uv run pytest tests/ -v
 ## Roadmap
 
 Future features:
-- [IP] Add support for PowerPoint and Word
-- [ ] Add toggle for bg remover
-- [IP] Add ability to upload multiple images
+- Add support for PowerPoint and Word (IP)
+- Add toggle for bg remover
+- Add ability to upload multiple images (IP)
 
 Known issues:
-- [ ] Allows too many file types to be uploaded
-- [ ] Report button doesn't work
+- Allows too many file types to be uploaded
+- Report button doesn't work
