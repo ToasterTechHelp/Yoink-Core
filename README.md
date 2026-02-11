@@ -141,7 +141,11 @@ uv run pytest tests/ -v
 
 ## Roadmap
 
-- [x] Phase 1: Extraction engine (CLI)
-- [x] Phase 2: FastAPI backend
-- [x] Phase 3: Next.js frontend + Supabase
-- [ ] Phase 4: Dockerized backend deployment
+Future features:
+- [IP] Add support for PowerPoint and Word
+- [ ] Add toggle for bg remover
+- [IP] Add ability to upload multiple images
+
+Known issues:
+- [ ] Allows too many file types to be uploaded
+- [ ] Report button doesn't work
