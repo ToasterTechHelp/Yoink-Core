@@ -12,22 +12,27 @@ interface ComponentCardProps {
 export function ComponentCard({ component }: ComponentCardProps) {
   const [copied, setCopied] = useState(false);
 
-  const handleCopy = async () => {
-    try {
-      const res = await fetch(component.url, { 
-        mode: 'cors',
-        cache: 'no-store' 
+  const handleCopy = () => {
+    const imgPromise = fetch(component.url, {
+      mode: "cors",
+      cache: "no-store",
+    }).then(async (response) => {
+      if (!response.ok) throw new Error("Network error");
+      const blob = await response.blob();
+      return new Blob([blob], { type: "image/png" });
+    });
+
+    const item = new ClipboardItem({ "image/png": imgPromise });
+    navigator.clipboard
+      .write([item])
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+      })
+      .catch((err) => {
+        console.error("Clipboard write failed:", err);
+        window.open(component.url, "_blank");
       });
-      const blob = await res.blob();
-      await navigator.clipboard.write([
-        new ClipboardItem({ [blob.type]: blob }),
-      ]);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch (error) {
-      console.error("Clipboard copy failed:", error);
-      window.open(component.url, "_blank");
-    }
   };
 
   const isText = component.category === "text";
@@ -43,11 +48,18 @@ export function ComponentCard({ component }: ComponentCardProps) {
           draggable
           style={{ pointerEvents: "auto" }}
         />
+      </div>
+
+      <div className="flex items-center justify-between px-3 py-2">
+        <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+          {component.category}
+        </span>
         <Button
-          variant="secondary"
+          variant="ghost"
           size="icon"
-          className="absolute right-2 top-2 h-8 w-8"
+          className="h-6 w-6 p-0 text-muted-foreground hover:text-foreground"
           onClick={handleCopy}
+          aria-label="Copy component image"
         >
           {copied ? (
             <Check className="h-4 w-4 text-green-500" />
@@ -55,13 +67,6 @@ export function ComponentCard({ component }: ComponentCardProps) {
             <Copy className="h-4 w-4" />
           )}
         </Button>
-      </div>
-
-      {/* Label */}
-      <div className="px-3 py-2">
-        <span className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-          {component.category}
-        </span>
       </div>
     </div>
   );

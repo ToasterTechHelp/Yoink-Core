@@ -137,7 +137,6 @@ export default function ResultsPage() {
     return [...map.entries()].sort(([a], [b]) => a - b);
   }, [filtered]);
 
-  // Extract visible page numbers for quick-jump bar
   const visiblePages = useMemo(() => {
     return grouped.map(([pageNum]) => pageNum);
   }, [grouped]);
@@ -232,7 +231,7 @@ export default function ResultsPage() {
             </div>
 
             {/* Flex-wrap: cards size to their content */}
-            <div className="flex flex-wrap gap-4">
+            <div className="flex flex-wrap items-start gap-4">
               {comps.map((comp) => (
                 <ComponentCard key={comp.id} component={comp} />
               ))}
