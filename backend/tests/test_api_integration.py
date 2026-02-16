@@ -325,8 +325,8 @@ class TestCleanupBehavior:
         resp = integration_client.get(f"/api/v1/jobs/{job_id}")
         assert resp.json()["status"] == "completed"
     
-    def test_delete_job_cleans_up_files(self, integration_client, tmp_path):
-        """Test that DELETE endpoint removes job files and DB entry."""
+    def test_delete_job_requires_authentication(self, integration_client, tmp_path):
+        """Guest delete attempts should be blocked with 401."""
         # Create and upload
         test_img = tmp_path / "test.png"
         create_test_image(test_img)
@@ -348,17 +348,19 @@ class TestCleanupBehavior:
                 break
             time.sleep(0.5)
         
-        # Delete the job
+        # Guest delete should be rejected
         resp = integration_client.delete(f"/api/v1/jobs/{job_id}")
-        assert resp.status_code == 204
-        
-        # Verify job is gone
+        assert resp.status_code == 401
+
+        # Verify job still exists
         resp = integration_client.get(f"/api/v1/jobs/{job_id}")
-        assert resp.status_code == 404
+        assert resp.status_code == 200
 
 
 class TestErrorHandling:
     """Test error scenarios and recovery."""
+
+    MISSING_JOB_ID = "11111111-1111-1111-1111-111111111111"
     
     def test_invalid_file_type_rejected(self, integration_client):
         """Test that a corrupt/invalid file fails during processing."""
@@ -405,17 +407,19 @@ class TestErrorHandling:
     
     def test_get_result_404_nonexistent_job(self, integration_client):
         """GET /result for nonexistent job should return 404."""
-        resp = integration_client.get("/api/v1/jobs/nonexistent/result")
+        resp = integration_client.get(
+            f"/api/v1/jobs/{self.MISSING_JOB_ID}/result"
+        )
         assert resp.status_code == 404
-    
-    def test_delete_nonexistent_job_404(self, integration_client):
-        """DELETE for nonexistent job should return 404."""
-        resp = integration_client.delete("/api/v1/jobs/nonexistent")
-        assert resp.status_code == 404
-    
+
+    def test_delete_nonexistent_job_requires_auth(self, integration_client):
+        """DELETE should require authentication before ownership checks."""
+        resp = integration_client.delete(f"/api/v1/jobs/{self.MISSING_JOB_ID}")
+        assert resp.status_code == 401
+
     def test_get_status_nonexistent_job_404(self, integration_client):
         """GET /jobs/{id} for nonexistent job should return 404."""
-        resp = integration_client.get("/api/v1/jobs/nonexistent")
+        resp = integration_client.get(f"/api/v1/jobs/{self.MISSING_JOB_ID}")
         assert resp.status_code == 404
 
 
@@ -481,7 +485,7 @@ class TestFeedbackEndpoint:
         """Feedback for a nonexistent job should return 404."""
         resp = integration_client.post(
             "/api/v1/feedback",
-            json={"job_id": "nonexistent", "type": "bug"},
+            json={"job_id": "11111111-1111-1111-1111-111111111111", "type": "bug"},
         )
         assert resp.status_code == 404
     
@@ -646,7 +650,7 @@ class TestBatchedComponentLoading:
     def test_components_nonexistent_job(self, integration_client):
         """Components endpoint should return 404 for nonexistent job."""
         resp = integration_client.get(
-            "/api/v1/jobs/nonexistent/result/components",
+            "/api/v1/jobs/11111111-1111-1111-1111-111111111111/result/components",
             params={"offset": 0, "limit": 10},
         )
         assert resp.status_code == 404

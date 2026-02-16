@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState, type DragEvent } from "react";
 import { Copy, Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import type { ComponentData } from "@/lib/api";
@@ -11,6 +11,9 @@ interface ComponentCardProps {
 
 export function ComponentCard({ component }: ComponentCardProps) {
   const [copied, setCopied] = useState(false);
+  const imageRef = useRef<HTMLImageElement | null>(null);
+  const noSelectClasses =
+    "select-none [-webkit-touch-callout:none] [-webkit-user-select:none]";
 
   const handleCopy = () => {
     const imgPromise = fetch(component.url, {
@@ -35,18 +38,41 @@ export function ComponentCard({ component }: ComponentCardProps) {
       });
   };
 
-  const isText = component.category === "text";
+  const handleDragStart = (event: DragEvent<HTMLDivElement>) => {
+    const dt = event.dataTransfer;
+    dt.effectAllowed = "copy";
+    dt.setData("text/plain", component.url);
+    dt.setData("text/uri-list", component.url);
+    dt.setData("text/html", `<img src="${component.url}" alt="component image">`);
+
+    if (imageRef.current) {
+      dt.setDragImage(
+        imageRef.current,
+        imageRef.current.width / 2,
+        imageRef.current.height / 2
+      );
+    }
+  };
 
   return (
-    <div className="relative w-fit max-w-sm overflow-hidden rounded-xl border bg-card">
+    <div
+      className={`relative w-fit max-w-sm overflow-hidden rounded-xl border bg-card ${noSelectClasses}`}
+    >
       {/* Image — draggable with real src for iPad native drag */}
       <div className="relative flex justify-center p-2">
         <img
+          ref={imageRef}
           src={component.url}
           alt={`${component.category} component`}
-          className="w-full object-contain"
+          className={`w-full object-contain pointer-events-none [-webkit-user-drag:none] ${noSelectClasses}`}
+          draggable={false}
+        />
+        <div
+          className={`absolute inset-2 z-10 cursor-grab active:cursor-grabbing touch-none ${noSelectClasses}`}
           draggable
-          style={{ pointerEvents: "auto" }}
+          onDragStart={handleDragStart}
+          onContextMenu={(event) => event.preventDefault()}
+          aria-label={`Drag ${component.category} component`}
         />
       </div>
 

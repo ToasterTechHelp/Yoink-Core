@@ -1,12 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { toast } from "sonner";
 import { Dropzone } from "@/components/dropzone";
 import { FeatureCards } from "@/components/feature-cards";
 import { ProcessingOverlay } from "@/components/processing-overlay";
 import { JobCard } from "@/components/job-card";
+import { RenameUploadDialog } from "@/components/rename-upload-dialog";
 import { Badge } from "@/components/ui/badge";
 import { createClient } from "@/lib/supabase/client";
 import { uploadFile, pollJobStatus, getJobResult, deleteJob } from "@/lib/api";
@@ -27,6 +28,14 @@ export default function Home() {
   const setGuestResult = useYoinkStore((s) => s.setGuestResult);
   const activeJobStatus = useYoinkStore((s) => s.activeJobStatus);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [renameDialogOpen, setRenameDialogOpen] = useState(false);
+  const [renameTarget, setRenameTarget] = useState<SupabaseJob | null>(null);
+
+  const getAccessToken = useCallback(async (): Promise<string | undefined> => {
+    if (!supabase) return undefined;
+    const { data } = await supabase.auth.getSession();
+    return data.session?.access_token;
+  }, [supabase]);
 
   // Fetch user jobs from Supabase
   useEffect(() => {
@@ -120,9 +129,8 @@ export default function Home() {
 
         // Get token if authenticated
         let token: string | undefined;
-        if (user && supabase) {
-          const { data } = await supabase.auth.getSession();
-          token = data.session?.access_token;
+        if (user) {
+          token = await getAccessToken();
         }
 
         const { job_id } = await uploadFile(file, token);
@@ -134,7 +142,7 @@ export default function Home() {
         resetActiveJob();
       }
     },
-    [user, supabase, setActiveJob, updateJobStatus, resetActiveJob, startPolling]
+    [user, getAccessToken, setActiveJob, updateJobStatus, resetActiveJob, startPolling]
   );
 
   const handleOpenJob = (jobId: string) => {
@@ -143,16 +151,39 @@ export default function Home() {
 
   const handleDeleteJob = async (jobId: string) => {
     try {
-      await deleteJob(jobId);
-      // Remove from Supabase directly too
-      if (supabase) {
-        await supabase.from("jobs").delete().eq("id", jobId);
+      const token = await getAccessToken();
+      if (!token) {
+        throw new Error("Authentication required");
       }
+      await deleteJob(jobId, token);
       setUserJobs(userJobs.filter((j) => j.id !== jobId));
       toast.success("Job deleted");
     } catch (err: any) {
       toast.error(err.message || "Failed to delete job");
     }
+  };
+
+  const handleOpenRenameDialog = (job: SupabaseJob) => {
+    setRenameTarget(job);
+    setRenameDialogOpen(true);
+  };
+
+  const closeRenameDialog = () => {
+    setRenameDialogOpen(false);
+    setRenameTarget(null);
+  };
+
+  const handleRenamed = (jobId: string, title: string) => {
+    setUserJobs(
+      userJobs.map((job) =>
+        job.id === jobId
+          ? {
+              ...job,
+              title,
+            }
+          : job
+      )
+    );
   };
 
   const isProcessing =
@@ -204,6 +235,7 @@ export default function Home() {
                     key={job.id}
                     job={job}
                     onOpen={handleOpenJob}
+                    onRename={handleOpenRenameDialog}
                     onDelete={handleDeleteJob}
                   />
                 ))}
@@ -225,6 +257,14 @@ export default function Home() {
           Built with love and magic
         </footer>
       </div>
+
+      <RenameUploadDialog
+        open={renameDialogOpen}
+        job={renameTarget}
+        onClose={closeRenameDialog}
+        onRenamed={handleRenamed}
+        getAccessToken={getAccessToken}
+      />
     </>
   );
 }

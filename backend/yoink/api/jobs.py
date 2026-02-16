@@ -196,6 +196,25 @@ class JobStore:
         await self._db.commit()
         return cursor.rowcount > 0
 
+    async def rename_job(self, job_id: str, filename: str) -> bool:
+        """
+        Rename the stored filename for a job.
+
+        Args:
+            job_id: The job to rename
+            filename: The new filename/title
+
+        Returns:
+            True if a job was updated, False if not found
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        cursor = await self._db.execute(
+            "UPDATE jobs SET filename = ?, updated_at = ? WHERE id = ?",
+            (filename, now, job_id),
+        )
+        await self._db.commit()
+        return cursor.rowcount > 0
+
     async def cleanup_old_jobs(self, max_age_hours: int = 24) -> int:
         """
         Delete guest jobs older than max_age_hours from the database.

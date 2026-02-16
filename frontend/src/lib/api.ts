@@ -79,14 +79,39 @@ export async function getJobResult(
   return res.json();
 }
 
-export async function deleteJob(jobId: string): Promise<void> {
+export async function deleteJob(jobId: string, token: string): Promise<void> {
   const res = await fetch(`${API_URL}/api/v1/jobs/${jobId}`, {
     method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
   });
   if (!res.ok && res.status !== 204) {
     const err = await res.json();
     throw new Error(err.detail || "Failed to delete job");
   }
+}
+
+export async function renameUpload(
+  jobId: string,
+  baseName: string,
+  token: string
+): Promise<{ job_id: string; title: string }> {
+  const res = await fetch(`${API_URL}/api/v1/jobs/${jobId}/rename`, {
+    method: "PATCH",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ base_name: baseName }),
+  });
+
+  if (!res.ok) {
+    const err = await res.json();
+    throw new Error(err.detail || "Failed to rename upload");
+  }
+
+  return res.json();
 }
 
 export async function submitFeedback(

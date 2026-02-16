@@ -45,6 +45,17 @@ class FeedbackResponse(BaseModel):
     status: str = "submitted"
 
 
+class RenameJobRequest(BaseModel):
+    """Request body for PATCH /jobs/{id}/rename."""
+    base_name: str = Field(..., max_length=120)
+
+
+class RenameJobResponse(BaseModel):
+    """Returned on successful job rename."""
+    job_id: str
+    title: str
+
+
 class ResultMetadataResponse(BaseModel):
     """Returned on GET /jobs/{id}/result — metadata only, no components."""
     source_file: str

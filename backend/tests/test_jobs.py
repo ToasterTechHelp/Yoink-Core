@@ -90,6 +90,27 @@ async def test_delete_nonexistent_job(job_store):
 
 
 @pytest.mark.asyncio
+async def test_rename_job(job_store):
+    job_id = await job_store.create_job("old.pdf", "/tmp/old.pdf")
+    before = await job_store.get_job(job_id)
+
+    # Ensure updated_at changes between writes
+    await asyncio.sleep(0.001)
+    renamed = await job_store.rename_job(job_id, "new.pdf")
+
+    after = await job_store.get_job(job_id)
+    assert renamed is True
+    assert after["filename"] == "new.pdf"
+    assert after["updated_at"] != before["updated_at"]
+
+
+@pytest.mark.asyncio
+async def test_rename_nonexistent_job(job_store):
+    renamed = await job_store.rename_job("nonexistent", "new.pdf")
+    assert renamed is False
+
+
+@pytest.mark.asyncio
 async def test_invalid_status_raises(job_store):
     job_id = await job_store.create_job("test.pdf", "/tmp/test.pdf")
     with pytest.raises(AssertionError, match="Invalid status"):

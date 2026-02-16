@@ -3,12 +3,11 @@
 import json
 import logging
 import os
-import shutil
+import re
 import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse
 
 from yoink.api.auth import get_optional_user
 from yoink.api.models import (
@@ -22,9 +21,16 @@ from yoink.api.models import (
     JobResponse,
     JobStatusResponse,
     ProgressInfo,
+    RenameJobRequest,
+    RenameJobResponse,
     ResultMetadataResponse,
 )
-from yoink.api.storage import count_user_jobs, delete_job_from_supabase
+from yoink.api.user_jobs import (
+    count_user_jobs,
+    delete_user_job,
+    get_user_job,
+    rename_user_job,
+)
 from yoink.api.worker import ExtractionWorker
 
 logger = logging.getLogger(__name__)
@@ -35,6 +41,34 @@ MAX_UPLOAD_SIZE = 100 * 1024 * 1024  # 100 MB
 MAX_USER_SLOTS = 5
 UPLOAD_DIR = Path("./uploads")
 API_URL = os.environ.get("YOINK_API_URL", "http://127.0.0.1:8000")
+MAX_BASE_NAME_LENGTH = 120
+INVALID_BASE_NAME_PATTERN = re.compile(r"[\\/]|[\x00-\x1f\x7f]")
+
+
+def _normalize_job_id(job_id: str) -> str:
+    """Normalize supported job ID formats to lowercase 32-char hex."""
+    try:
+        return uuid.UUID(job_id).hex
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Invalid job ID format") from exc
+
+
+def _validate_base_name(base_name: str) -> str:
+    """Validate and sanitize rename base name."""
+    cleaned = base_name.strip()
+    if not cleaned:
+        raise HTTPException(status_code=422, detail="Name cannot be empty")
+    if len(cleaned) > MAX_BASE_NAME_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Name must be at most {MAX_BASE_NAME_LENGTH} characters",
+        )
+    if INVALID_BASE_NAME_PATTERN.search(cleaned):
+        raise HTTPException(
+            status_code=422,
+            detail="Name cannot contain slashes or control characters",
+        )
+    return cleaned
 
 
 @router.post(
@@ -104,7 +138,7 @@ async def extract(request: Request, file: UploadFile):
 )
 async def get_job_status(request: Request, job_id: str):
     """Get the status and progress of a job."""
-    job_id = job_id.replace("-", "")
+    job_id = _normalize_job_id(job_id)
     job_store = request.app.state.job_store
     job = await job_store.get_job(job_id)
     if job is None:
@@ -133,7 +167,7 @@ async def get_job_result(request: Request, job_id: str):
     - Guest jobs: returns full GuestResultResponse with static URLs.
     - User jobs: returns ResultMetadataResponse (frontend reads from Supabase).
     """
-    job_id = job_id.replace("-", "")
+    job_id = _normalize_job_id(job_id)
     job_store = request.app.state.job_store
     job = await job_store.get_job(job_id)
     if job is None:
@@ -198,7 +232,7 @@ async def get_result_components(
     Primarily used for guest jobs. User jobs read directly from Supabase.
     Returns components with static URLs (no base64).
     """
-    job_id = job_id.replace("-", "")
+    job_id = _normalize_job_id(job_id)
     job_store = request.app.state.job_store
     job = await job_store.get_job(job_id)
     if job is None:
@@ -253,42 +287,117 @@ async def get_result_components(
 @router.delete(
     "/jobs/{job_id}",
     status_code=204,
-    responses={404: {"model": ErrorResponse}},
+    responses={
+        401: {"model": ErrorResponse},
+        403: {"model": ErrorResponse},
+        404: {"model": ErrorResponse},
+        422: {"model": ErrorResponse},
+        502: {"model": ErrorResponse},
+    },
 )
 async def delete_job(request: Request, job_id: str):
     """Cancel and clean up a job.
 
-    - Guest: cleans local files + SQLite row.
-    - User: also deletes Supabase DB row + Storage objects.
+    - Authenticated user jobs are deleted from Supabase (source of truth).
+    - Guest jobs cannot be manually deleted.
     """
-    # Normalize: Supabase returns UUIDs with dashes, SQLite stores hex (no dashes)
-    job_id = job_id.replace("-", "")
+    requester_id = await get_optional_user(request)
+    if requester_id is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
 
+    job_id = _normalize_job_id(job_id)
     job_store = request.app.state.job_store
     supabase = request.app.state.supabase
 
-    job = await job_store.get_job(job_id)
-    if job is None:
+    # Explicitly block manual guest delete when a local guest job exists.
+    local_job = await job_store.get_job(job_id)
+    if local_job is not None and local_job.get("user_id") is None:
+        raise HTTPException(status_code=403, detail="Guest jobs cannot be deleted manually")
+
+    if supabase is None:
+        raise HTTPException(status_code=502, detail="Supabase is not configured")
+
+    # Supabase is authoritative for authenticated user jobs.
+    if await get_user_job(requester_id, job_id, supabase) is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
-    user_id = job.get("user_id")
+    try:
+        await delete_user_job(requester_id, job_id, supabase)
+    except Exception:
+        logger.exception(
+            "Delete failed at Supabase stage (job_id=%s requester_id=%s stage=supabase_delete)",
+            job_id,
+            requester_id,
+        )
+        raise HTTPException(status_code=502, detail="Failed to delete job resources")
 
-    # Clean up local files
-    ExtractionWorker.cleanup_job_files(job.get("upload_path"), job.get("result_path"))
+    # Best-effort local cleanup for drifted local rows.
+    if local_job is not None:
+        ExtractionWorker.cleanup_job_files(local_job.get("upload_path"), local_job.get("result_path"))
+        await job_store.delete_job(job_id)
 
-    # Clean up guest static files
-    if user_id is None:
-        guest_static_dir = Path("./static/guest") / job_id
-        if guest_static_dir.exists():
-            shutil.rmtree(guest_static_dir, ignore_errors=True)
+    logger.info("Deleted user job %s for requester %s", job_id, requester_id)
 
-    # Clean up Supabase resources for user jobs
-    if user_id and supabase:
-        await delete_job_from_supabase(user_id, job_id, supabase)
 
-    # Delete from SQLite
-    await job_store.delete_job(job_id)
-    logger.info("Job %s deleted (user=%s)", job_id, user_id or "guest")
+@router.patch(
+    "/jobs/{job_id}/rename",
+    response_model=RenameJobResponse,
+    responses={
+        401: {"model": ErrorResponse},
+        404: {"model": ErrorResponse},
+        422: {"model": ErrorResponse},
+        502: {"model": ErrorResponse},
+    },
+)
+async def rename_job(request: Request, job_id: str, body: RenameJobRequest):
+    """Rename a saved upload for an authenticated user."""
+    requester_id = await get_optional_user(request)
+    if requester_id is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+
+    job_id = _normalize_job_id(job_id)
+    supabase = request.app.state.supabase
+
+    if supabase is None:
+        raise HTTPException(status_code=502, detail="Supabase is not configured")
+
+    user_job = await get_user_job(requester_id, job_id, supabase)
+    if user_job is None:
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    base_name = _validate_base_name(body.base_name)
+    old_title = user_job.title
+    extension = Path(old_title).suffix
+    new_title = f"{base_name}{extension}"
+
+    if old_title == new_title:
+        return RenameJobResponse(job_id=job_id, title=new_title)
+
+    try:
+        await rename_user_job(
+            user_id=requester_id,
+            job_id_hex=job_id,
+            title=new_title,
+            supabase=supabase,
+        )
+    except Exception:
+        logger.exception(
+            "Rename failed at Supabase stage (job_id=%s requester_id=%s stage=supabase_rename)",
+            job_id,
+            requester_id,
+        )
+        raise HTTPException(
+            status_code=502,
+            detail="Failed to rename job",
+        )
+
+    # Best-effort local sync if a matching local user row still exists.
+    job_store = request.app.state.job_store
+    local_job = await job_store.get_job(job_id)
+    if local_job is not None and local_job.get("user_id") == requester_id:
+        await job_store.rename_job(job_id, new_title)
+
+    return RenameJobResponse(job_id=job_id, title=new_title)
 
 
 @router.post(
@@ -300,14 +409,15 @@ async def delete_job(request: Request, job_id: str):
 async def submit_feedback(request: Request, body: FeedbackRequest):
     """Submit a bug report or content violation report for a job."""
     job_store = request.app.state.job_store
+    job_id = _normalize_job_id(body.job_id)
 
     # Verify the job exists
-    job = await job_store.get_job(body.job_id)
+    job = await job_store.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found")
 
     feedback_id = await job_store.create_feedback(
-        job_id=body.job_id,
+        job_id=job_id,
         feedback_type=body.type,
         message=body.message,
     )

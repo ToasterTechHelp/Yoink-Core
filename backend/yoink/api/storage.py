@@ -1,10 +1,8 @@
-"""Supabase Storage helpers for uploading/deleting component images."""
+"""Supabase Storage helpers for uploading component images."""
 
 import asyncio
 import base64
-import json
 import logging
-from pathlib import Path
 from typing import Any
 
 from supabase import Client as SupabaseClient
@@ -155,66 +153,3 @@ async def save_job_to_supabase(
         ).execute(),
     )
     logger.info("Saved job %s to Supabase for user %s", job_id, user_id)
-
-
-async def delete_job_from_supabase(
-    user_id: str,
-    job_id: str,
-    supabase: SupabaseClient,
-) -> None:
-    """Delete a job's Supabase DB row and all its Storage objects.
-
-    Args:
-        user_id: Authenticated user's UUID.
-        job_id: The job identifier.
-        supabase: Supabase client instance (service_role).
-    """
-    loop = asyncio.get_running_loop()
-
-    # List and delete all storage objects for this job
-    storage_prefix = f"{user_id}/{job_id}"
-    try:
-        files = await loop.run_in_executor(
-            None,
-            lambda: supabase.storage.from_(BUCKET_NAME).list(storage_prefix),
-        )
-        if files:
-            paths = [f"{storage_prefix}/{f['name']}" for f in files]
-            await loop.run_in_executor(
-                None,
-                lambda: supabase.storage.from_(BUCKET_NAME).remove(paths),
-            )
-            logger.info("Deleted %d storage objects for job %s", len(paths), job_id)
-    except Exception:
-        logger.exception("Error cleaning up storage for job %s", job_id)
-
-    # Delete the DB row
-    try:
-        await loop.run_in_executor(
-            None,
-            lambda: supabase.table("jobs").delete().eq("id", job_id).execute(),
-        )
-        logger.info("Deleted Supabase job row %s", job_id)
-    except Exception:
-        logger.exception("Error deleting Supabase job row %s", job_id)
-
-
-async def count_user_jobs(user_id: str, supabase: SupabaseClient) -> int:
-    """Count how many saved jobs a user has in Supabase.
-
-    Args:
-        user_id: Authenticated user's UUID.
-        supabase: Supabase client instance (service_role).
-
-    Returns:
-        Number of jobs the user currently has.
-    """
-    loop = asyncio.get_running_loop()
-    result = await loop.run_in_executor(
-        None,
-        lambda: supabase.table("jobs")
-        .select("id", count="exact")
-        .eq("user_id", user_id)
-        .execute(),
-    )
-    return result.count or 0

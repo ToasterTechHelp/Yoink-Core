@@ -1,7 +1,7 @@
 "use client";
 
 import { formatDistanceToNow } from "date-fns";
-import { ExternalLink, MoreVertical, Trash2, FileText } from "lucide-react";
+import { ExternalLink, MoreVertical, Trash2, FileText, Pencil } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -14,10 +14,11 @@ import type { SupabaseJob } from "@/store/useYoinkStore";
 interface JobCardProps {
   job: SupabaseJob;
   onOpen: (jobId: string) => void;
+  onRename: (job: SupabaseJob) => void;
   onDelete: (jobId: string) => void;
 }
 
-export function JobCard({ job, onOpen, onDelete }: JobCardProps) {
+export function JobCard({ job, onOpen, onRename, onDelete }: JobCardProps) {
   const timeAgo = formatDistanceToNow(new Date(job.created_at), {
     addSuffix: true,
   });
@@ -52,6 +53,10 @@ export function JobCard({ job, onOpen, onDelete }: JobCardProps) {
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
+          <DropdownMenuItem onClick={() => onRename(job)}>
+            <Pencil className="mr-2 h-4 w-4" />
+            Rename
+          </DropdownMenuItem>
           <DropdownMenuItem
             className="text-destructive"
             onClick={() => onDelete(job.id)}
