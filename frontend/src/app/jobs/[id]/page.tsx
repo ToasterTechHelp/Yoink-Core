@@ -37,6 +37,7 @@ export default function ResultsPage() {
   const [activeCategories, setActiveCategories] = useState<Set<string>>(
     new Set()
   );
+  const [isGlobalTransparent, setIsGlobalTransparent] = useState(false);
   const [transparentModeByKey, setTransparentModeByKey] = useState<
     Record<string, boolean>
   >({});
@@ -44,6 +45,7 @@ export default function ResultsPage() {
   const pageRefs = useRef<Map<number, HTMLDivElement>>(new Map());
 
   useEffect(() => {
+    setIsGlobalTransparent(false);
     setTransparentModeByKey({});
   }, [jobId]);
 
@@ -168,6 +170,11 @@ export default function ResultsPage() {
     }
   };
 
+  const handleGlobalTransparentToggle = () => {
+    setIsGlobalTransparent((prev) => !prev);
+    setTransparentModeByKey({});
+  };
+
   if (loading) {
     return (
       <div className="flex h-[60dvh] items-center justify-center">
@@ -208,10 +215,19 @@ export default function ResultsPage() {
               </p>
             </div>
           </div>
-          <Button variant="outline" size="sm" onClick={handleReport}>
-            <Flag className="mr-1 h-3.5 w-3.5" />
-            <span className="hidden sm:inline">Report a problem</span>
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleGlobalTransparentToggle}
+            >
+              Transparent: {isGlobalTransparent ? "On" : "Off"}
+            </Button>
+            <Button variant="outline" size="sm" onClick={handleReport}>
+              <Flag className="mr-1 h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Report a problem</span>
+            </Button>
+          </div>
         </div>
 
         {/* Category filters */}
@@ -245,7 +261,7 @@ export default function ResultsPage() {
             <div className="flex flex-wrap items-start gap-4">
               {comps.map((comp) => {
                 const key = componentKey(comp);
-                const isTransparent = Boolean(transparentModeByKey[key]);
+                const isTransparent = transparentModeByKey[key] ?? isGlobalTransparent;
                 const imageUrl = isTransparent
                   ? buildTransparentRenderUrl(comp.url)
                   : comp.url;
@@ -257,10 +273,13 @@ export default function ResultsPage() {
                     imageUrl={imageUrl}
                     isTransparent={isTransparent}
                     onToggleTransparent={() =>
-                      setTransparentModeByKey((prev) => ({
-                        ...prev,
-                        [key]: !prev[key],
-                      }))
+                      setTransparentModeByKey((prev) => {
+                        const current = prev[key] ?? isGlobalTransparent;
+                        return {
+                          ...prev,
+                          [key]: !current,
+                        };
+                      })
                     }
                   />
                 );

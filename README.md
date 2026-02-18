@@ -143,8 +143,8 @@ uv run pytest tests/ -v
 
 Future features:
 - Add support for PowerPoint and Word (IP)
-- Add toggle for bg remover
 - Add ability to upload multiple images (IP)
+- Run uploading process in background (IP)
 
 Known issues:
 - Allows too many file types to be uploaded

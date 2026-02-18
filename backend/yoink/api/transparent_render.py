@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+import numpy as np
 from PIL import Image
 
 from yoink.api.storage import BUCKET_NAME
@@ -16,7 +17,7 @@ from yoink.api.storage import BUCKET_NAME
 SOURCE_KIND_SUPABASE: Literal["supabase"] = "supabase"
 SOURCE_KIND_GUEST: Literal["guest"] = "guest"
 MAX_SOURCE_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB
-START_FADE = 180
+START_FADE = 230
 PURE_WHITE = 250
 
 _SUPABASE_PUBLIC_PREFIX = f"/storage/v1/object/public/{BUCKET_NAME}/"
@@ -110,25 +111,26 @@ def make_background_transparent(image_bytes: bytes) -> bytes:
     except Exception as exc:
         raise ValueError("Unsupported image data") from exc
 
-    pixels = list(img.getdata())
-    new_pixels = []
+    rgba = np.asarray(img, dtype=np.uint8).copy()
+    rgb = rgba[..., :3].astype(np.float32)
+    alpha = rgba[..., 3].astype(np.float32)
+    brightness = rgb.mean(axis=2)
 
-    for r, g, b, a in pixels:
-        brightness = (r + g + b) / 3
+    white_mask = brightness > PURE_WHITE
+    fade_mask = (brightness > START_FADE) & ~white_mask
 
-        if brightness > PURE_WHITE:
-            new_pixels.append((255, 255, 255, 0))
-            continue
+    rgb_u8 = rgba[..., :3]
+    alpha_u8 = rgba[..., 3]
 
-        if brightness > START_FADE:
-            factor = (brightness - START_FADE) / (PURE_WHITE - START_FADE)
-            new_alpha = int(round(a * (1 - factor)))
-            new_pixels.append((r, g, b, new_alpha))
-            continue
+    rgb_u8[white_mask] = 255
+    alpha_u8[white_mask] = 0
 
-        new_pixels.append((r, g, b, a))
+    if np.any(fade_mask):
+        factor = (brightness[fade_mask] - START_FADE) / (PURE_WHITE - START_FADE)
+        new_alpha = np.rint(alpha[fade_mask] * (1 - factor)).clip(0, 255).astype(np.uint8)
+        alpha_u8[fade_mask] = new_alpha
 
-    img.putdata(new_pixels)
+    img = Image.fromarray(rgba, mode="RGBA")
 
     output = io.BytesIO()
     img.save(output, format="PNG")
