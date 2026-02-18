@@ -17,7 +17,7 @@ from yoink.api.storage import BUCKET_NAME
 SOURCE_KIND_SUPABASE: Literal["supabase"] = "supabase"
 SOURCE_KIND_GUEST: Literal["guest"] = "guest"
 MAX_SOURCE_IMAGE_BYTES = 8 * 1024 * 1024  # 8 MB
-START_FADE = 230
+START_FADE = 215
 PURE_WHITE = 250
 
 _SUPABASE_PUBLIC_PREFIX = f"/storage/v1/object/public/{BUCKET_NAME}/"
@@ -126,7 +126,8 @@ def make_background_transparent(image_bytes: bytes) -> bytes:
     alpha_u8[white_mask] = 0
 
     if np.any(fade_mask):
-        factor = (brightness[fade_mask] - START_FADE) / (PURE_WHITE - START_FADE)
+        norm = (brightness[fade_mask] - START_FADE) / (PURE_WHITE - START_FADE)
+        factor = norm ** 5
         new_alpha = np.rint(alpha[fade_mask] * (1 - factor)).clip(0, 255).astype(np.uint8)
         alpha_u8[fade_mask] = new_alpha
 
